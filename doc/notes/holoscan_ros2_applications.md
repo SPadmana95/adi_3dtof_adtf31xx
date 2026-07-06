@@ -1,6 +1,6 @@
 # Holoscan ROS 2 Application Examples — Deep Dive
 
-Source: `holohub/applications/holoscan_ros2/` (holohub submodule, tag `holoscan-sdk-4.4.0`)
+Source: `holohub/applications/holoscan_ros2/` (holohub submodule, branch `adcam_ros2` @ tag `holoscan-sdk-3.9.0`)
 
 ---
 
@@ -421,12 +421,16 @@ holoscan::Resource
 
 ## Prerequisites
 
-| Requirement | Version |
+| Requirement | Version / Detail |
 |---|---|
-| NVIDIA Holoscan SDK | ≥ 3.0 |
-| ROS 2 | Jazzy (tested) |
-| Docker | With NVIDIA Container Toolkit |
-| NVIDIA GPU Driver | Compatible with Holoscan SDK |
+| **Host Device** | NVIDIA AGX Thor |
+| **JetPack** | 7.0 |
+| **Holoscan Sensor Bridge** | 2.5.0 (`holoscan-sensor-bridge` → branch `demo_HSB_ToF_ROS2`) |
+| **Holoscan SDK** | 3.9.0 |
+| **holohub** | branch `adcam_ros2` (pinned to tag `holoscan-sdk-3.9.0`) |
+| **ROS 2** | Jazzy (tested) |
+| **Docker** | With NVIDIA Container Toolkit |
+| **NVIDIA GPU Driver** | JetPack 7.0 compatible |
 | VB1940 camera *(vb1940 only)* | Eagle camera + hololink repo access |
 
 ---
