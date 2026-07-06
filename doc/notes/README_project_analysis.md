@@ -197,6 +197,34 @@ The actual node logic is written in C++ because:
 
 This separation is the recommended ROS 2 design — Python for wiring things together, C++ for doing the heavy lifting.
 
+### Why Not Follow the "Pure Package" Strategy?
+
+ROS 2 supports two package strategies:
+
+| Build Type | Node Language | Launch Language |
+|---|---|---|
+| `ament_python` | Python (`rclpy`) | Python |
+| `ament_cmake` | C++ (`rclcpp`) | **Still Python** |
+
+This package declares `ament_cmake` in `package.xml`:
+
+```xml
+<buildtool_depend>ament_cmake</buildtool_depend>
+<build_type>ament_cmake</build_type>
+```
+
+**ROS 2 does NOT have a C++ launch API.** The launch system is exclusively Python-based regardless of what language the nodes are written in. Even in a pure C++ package (`ament_cmake`), launch files must be written in Python. This is an ROS 2 architectural constraint — not a design choice by the package authors.
+
+#### Why not use `ament_python` (pure Python)?
+
+That would require rewriting all node logic in Python (`rclpy`), which this package cannot do because:
+
+1. **`libaditof` is a C++ SDK** — there are no Python bindings; calling it requires C++.
+2. **Performance** — processing raw sensor frames (depth, AB, XYZ, confidence) at real-time rates in Python would be too slow.
+3. **Threading model** — the input/output queue threading uses `boost::thread` and `std::mutex`, which have no direct Python equivalent at the same performance level.
+
+> **Conclusion:** `ament_cmake` C++ package with Python launch files is not a deviation from the ROS 2 strategy — it *is* the correct and mandatory pattern for any performance-critical ROS 2 node that requires C++ execution.
+
 ## Hardware
 
 - [EVAL-ADTF3175D-NXZ Module](https://www.analog.com/en/design-center/evaluation-hardware-and-software/evaluation-boards-kits/EVAL-ADTF3175.html#eb-overview)
