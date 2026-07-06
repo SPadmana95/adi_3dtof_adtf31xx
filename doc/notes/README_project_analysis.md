@@ -364,16 +364,18 @@ ros2 launch adi_3dtof_adtf31xx adi_3dtof_adtf31xx_launch.py arg_input_sensor_mod
 
 | Parameter                          | Type   | Default            | Description                                      |
 |------------------------------------|--------|--------------------|--------------------------------------------------|
-| **arg_input_sensor_mode**        | int    | 0                  | Input mode, `0:Real Time Sensor`, `2:FIle-io`, `3:Network Mode`  |
-| **arg_in_file_name**          | String | "no name"          | Input filename : Applicable only if the input mode is 2 |
-| **arg_ab_threshold**             | int    | 10                 | abThreshold for the sensor                       |
-| **arg_confidence_threshold**     | int    | 10                 | confidenceThreshold for the sensor               |
-| **arg_enable_depth_ab_compression** | bool | False                 | Enables RVL compression for the depth images     |
-| **arg_config_file_name_of_tof_sdk** | String | "config/config_adsd3500_adsd3100.json" | Configuration file name for ToF SDK |
-| **arg_camera_mode** | int | 3 | Camera Mode |
-| **arg_encoding_type** | String | mono16 | Sets encoding String. Use only `mono16` or `16UC1` |
+| **arg_input_sensor_mode**        | int    | 3                  | Input mode, `0:Real Time Sensor`, `2:File-io`, `3:Network Mode`  |
+| **arg_in_file_name**          | String | `adi_3dtof_height_170mm_yaw_135degrees_cam1.bin` | Input filename — applicable only if `arg_input_sensor_mode` is `2` |
+| **arg_input_sensor_ip**       | String | `10.43.0.1`        | IP address of the sensor — applicable only if `arg_input_sensor_mode` is `3` |
+| **arg_camera_height_from_ground_in_mtr** | float | 0.15    | Height of the sensor from the ground in meters   |
+| **arg_ab_threshold**             | int    | 10                 | AB invalidation threshold for the sensor         |
+| **arg_confidence_threshold**     | int    | 10                 | Confidence threshold for the sensor              |
+| **arg_enable_depth_ab_compression** | bool | False             | Enables RVL lossless compression for depth and AB images |
+| **arg_config_file_name_of_tof_sdk** | String | `config/config_adsd3500_adsd3100.json` | Configuration file name for ToF SDK |
+| **arg_camera_mode** | int | 3 | Camera imaging mode — see Camera Modes table below |
+| **arg_encoding_type** | String | `mono16` | ROS image encoding — use `mono16` or `16UC1` |
 | **arg_enable_depth_publish**      | bool   | True               | Enable publishing of depth images                |
-| **arg_enable_ab_publish**         | bool   | True               | Enable publishing of AB images       |
+| **arg_enable_ab_publish**         | bool   | True               | Enable publishing of AB (active brightness) images |
 | **arg_enable_conf_publish**       | bool   | True               | Enable publishing of confidence images           |
 | **arg_enable_point_cloud_publish**| bool   | False              | Enable publishing of point cloud data            |
 
