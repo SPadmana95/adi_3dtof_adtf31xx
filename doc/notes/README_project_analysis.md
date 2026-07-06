@@ -168,6 +168,35 @@ The **ADI 3DToF ADTF31xx** is a ROS (Robot Operating System) package for working
 | `read_rosbags.cpp` | Rosbag-to-bin converter node — reads recorded ROS 2 bag files containing depth and AB image topics and writes them to the custom `.bin` binary format |
 | `ros-perception/.../rvl_codec.cpp` | RVL codec implementation — variable-length encoding/decoding of 16-bit depth pixel arrays using nibble-based run-length compression |
 
+## Why launch/ Uses Python and src/ Uses C++
+
+This is a standard ROS 2 architectural pattern where orchestration and execution are intentionally separated into different languages.
+
+### launch/ — Python files (`.py`)
+
+ROS 2 replaced the old XML-based launch system (from ROS 1) with Python. Launch files are Python scripts that use the `launch` and `launch_ros` libraries to:
+- Declare arguments (`DeclareLaunchArgument`)
+- Instantiate nodes (`Node(package=..., executable=...)`)
+- Compose multi-node systems, set parameters, and conditionally start components
+
+Python gives full scripting power — loops, conditionals, JSON parsing, environment variables — which XML could not easily express.
+
+### src/ — C++ files (`.cpp`)
+
+The actual node logic is written in C++ because:
+- **Performance** — ToF sensor data involves large 16-bit image buffers, point cloud math, and RVL compression running at video frame rates. C++ handles this with minimal overhead.
+- **SDK compatibility** — `libaditof` is a C++ library. The sensor interface classes (`InputSensorADTF31XX`) call its APIs directly.
+- **Threading** — The input/output thread model with mutexes and queues maps naturally to C++ (`boost::thread`, `std::mutex`).
+
+### Summary
+
+| Layer | Language | Reason |
+|---|---|---|
+| Launch / orchestration | Python | Flexibility, scripting, ROS 2 standard |
+| Node logic / sensor I/O | C++ | Performance, SDK integration, threading |
+
+This separation is the recommended ROS 2 design — Python for wiring things together, C++ for doing the heavy lifting.
+
 ## Hardware
 
 - [EVAL-ADTF3175D-NXZ Module](https://www.analog.com/en/design-center/evaluation-hardware-and-software/evaluation-boards-kits/EVAL-ADTF3175.html#eb-overview)
