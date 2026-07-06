@@ -80,13 +80,23 @@ docker images | grep pubsub
 
 ```sh
 source /opt/ros/jazzy/setup.bash
-ros2 --version
+
+# Check ROS 2 distro
+echo $ROS_DISTRO
+
+# Full ROS 2 setup check
+ros2 doctor
 ```
 
-Expected output:
+Expected output from `ros2 doctor`:
 ```
-ros2 cli v0.18.x (or later)
+ROS_DISTRO : jazzy
+ROS_VERSION : 2
+...
+1 package(s) checked, no errors found
 ```
+
+> **Note:** `ros2 --version` is not a valid command in ROS 2. Use `echo $ROS_DISTRO` or `ros2 doctor` instead.
 
 ---
 
