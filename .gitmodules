@@ -5,3 +5,4 @@
 [submodule "holohub"]
 	path = holohub
 	url = https://github.com/SPadmana95/holohub.git
+	branch = adcam_ros2
