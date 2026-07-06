@@ -1,3 +1,4 @@
 [submodule "holoscan-sensor-bridge"]
 	path = holoscan-sensor-bridge
 	url = https://github.com/SPadmana95/holoscan-sensor-bridge.git
+	branch = demo_HSB_ToF_ROS2
