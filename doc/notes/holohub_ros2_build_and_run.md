@@ -322,6 +322,24 @@ cd holohub
 
 ## Step 3 — Build the container (with ROS 2 + Vulkan + hololink)
 
+> **Note:** The vb1940 `README.md` only documents `./holohub build vb1940` (the application build inside the container). The `build-container` step below is **missing from the README** — it was derived from the holohub CLI and `metadata.json`.
+
+### How this command was derived
+
+```
+./holohub build-container vb1940 --language cpp \
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
+  --build-args="--no-cache"
+```
+
+| Part | Source | Reason |
+|---|---|---|
+| `build-container` | `./holohub build-container --help` | Separate from `build` — this builds the Docker image |
+| `vb1940` | `metadata.json` → `"dockerfile": "applications/holoscan_ros2/vb1940/Dockerfile"` | CLI uses this to find the correct Dockerfile |
+| `--language cpp` | `metadata.json` → `"language": "C++"` | Required when language must be explicit |
+| `--base-img holoscan:v3.9.0-cuda13` | Override for Dockerfile's hardcoded `ARG BASE_IMAGE=holoscan:v3.5.0-dgpu` | Must match your installed SDK (3.9.0) and CUDA version (13 on AGX Thor) |
+| `--build-args="--no-cache"` | Docker build cache issue | Forces Docker to re-run `git clone && git checkout tags/2.5.0`; without it, a stale cached layer clones the `main` branch (SDK 4.0+) causing CMake failure |
+
 The `vb1940` Dockerfile (`applications/holoscan_ros2/vb1940/Dockerfile`) installs:
 - ROS 2 Jazzy (`ros-jazzy-desktop`, `ros-jazzy-ros-base`)
 - Vulkan support (`vulkan-tools`, `vulkan-validationlayers`, `libvulkan1`) — required for HoloViz
@@ -359,7 +377,7 @@ The vb1940 build requires SSH access to the NVIDIA internal hololink repository.
 ```sh
 # On host — start ssh-agent and add your key
 eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_rsa          # or id_ed25519 depending on your key type
+ssh-add ~/.ssh/id_ed25519      # ed25519 key (use id_rsa if you have RSA key instead)
 
 # Verify key is loaded
 ssh-add -l
