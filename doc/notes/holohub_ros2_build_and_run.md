@@ -1,4 +1,4 @@
-# HoloHub pubsub — Build and Run Guide
+# HoloHub ROS 2 — Build and Run Guide
 
 ## Overview
 
@@ -266,8 +266,12 @@ The `vb1940` Dockerfile (`applications/holoscan_ros2/vb1940/Dockerfile`) install
 
 ```sh
 ./holohub build-container vb1940 --language cpp \
-  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
+  --build-args="--no-cache"
 ```
+
+> **Why `--no-cache`?**  
+> The vb1940 Dockerfile clones `holoscan-sensor-bridge` and checks out tag `2.5.0` (SDK 3.9.0 compatible). Without `--no-cache`, Docker may reuse a previously cached layer that cloned the upstream `main` branch (which requires SDK 4.0+), causing a CMake version error.
 
 Verify the image:
 
@@ -479,7 +483,8 @@ ros2 topic echo /vb1940/image --no-arr
 cd /home/jetsonthor/siva/SPadmana95/holohub
 
 ./holohub build-container vb1940 --language cpp \
-  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
+  --build-args="--no-cache"
 
 ./holohub run-container vb1940 --language cpp
 
