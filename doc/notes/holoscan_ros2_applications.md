@@ -305,6 +305,8 @@ sequenceDiagram
 
 ### vb1940/ — VB1940 Eagle Camera Examples (Advanced)
 
+> **C++ only** — unlike `pubsub` which has both C++ and Python implementations, `vb1940` is implemented in C++ only. This is because the camera SDK (`holoscan-sensor-bridge`) provides C++ APIs with no Python bindings.
+
 Production-grade example using the VB1940 (Eagle) camera with a full GPU-accelerated pipeline publishing to ROS 2.
 
 | File | Description |
@@ -598,7 +600,7 @@ holohub/operators/holoscan_ros2/
 │       ├── bridge.hpp          ← Core ROS 2 node manager + pub/sub factory
 │       ├── operator.hpp        ← Base class for all Holoscan ROS 2 operators
 │       ├── qos.hpp             ← QoS wrapper for Holoscan parameter system
-│       ├── yaml_converter.hpp  ← YAML serialisation helpers
+│       ├── yaml_converter.hpp  ← YAML serialisation helpers (prevents Holoscan YAML system from failing on unsupported QoS type)
 │       └── operators/
 │           ├── publisher.hpp   ← Template publisher operator
 │           └── subscriber.hpp  ← Template subscriber operator
@@ -804,6 +806,20 @@ Typical usage: `holoscan::ros2::QoS(10)` — creates a QoS with history depth 10
 
 ---
 
+### `yaml_converter.hpp` — YAML Converter
+
+**File:** `holohub/operators/holoscan_ros2/cpp/holoscan/ros2/yaml_converter.hpp`
+
+Holoscan's parameter system uses YAML for serialisation/deserialisation of operator parameters. Since `holoscan::ros2::QoS` is not a built-in Holoscan type, it cannot be automatically converted to/from YAML. This header declares it as unsupported to prevent silent failures:
+
+```cpp
+ROS2_DECLARE_YAML_CONVERTER_UNSUPPORTED(holoscan::ros2::QoS)  // NOLINT
+```
+
+This means `QoS` parameters **cannot** be set from a YAML config file — they must be passed as `holoscan::Arg("qos", holoscan::ros2::QoS(10))` in C++ code.
+
+---
+
 ### Python Equivalents
 
 | C++ class | Python class | File |
@@ -812,6 +828,13 @@ Typical usage: `holoscan::ros2::QoS(10)` — creates a QoS with history depth 10
 | `holoscan::ros2::Operator` | `Operator` | `python/holoscan_ros2/operator.py` |
 | `PublisherOp<MsgT>` | `PublisherOp` | `python/holoscan_ros2/operators/publisher.py` |
 | `SubscriberOp<MsgT>` | `SubscriberOp` | `python/holoscan_ros2/operators/subscriber.py` |
+
+**Key differences in Python implementations:**
+
+- **`bridge.py`** — Takes an existing `rclpy.node.Node` object (must be created on the main thread before Bridge), then wraps it and starts `rclpy.spin()` in a daemon background thread. Unlike C++, there is no internal node creation by name.
+- **`operator.py`** — Python base operator that stores the `bridge` reference and exposes `ros2_bridge()` accessor. Equivalent to C++ `holoscan::ros2::Operator`.
+- **`publisher.py`** — Requires explicit `message_type` constructor argument (e.g. `message_type=std_msgs.msg.String`) since Python has no templates. Calls `bridge.create_publisher(message_type, topic_name, qos)` in `initialize()`.
+- **`subscriber.py`** — Requires `message_type` + optional `message_queue_max_size`. Returns `concurrent.futures.Future` from `receive()` instead of `std::future`. Uses `future.result(timeout=1.0)` with a shutdown-check loop for graceful exit (Python cannot cancel a blocking future like C++).
 
 Python `PublisherOp` and `SubscriberOp` require `message_type` as an explicit constructor argument (since Python has no templates):
 
@@ -861,12 +884,73 @@ holoscan::Resource
 
 ## Relevance to ADI 3DToF ADTF31xx
 
-The `pubsub` pattern directly mirrors how the `adi_3dtof_adtf31xx` node publishes depth/AB/confidence images to ROS 2 topics. The key difference is:
+The `pubsub` and `vb1940` patterns in holohub directly inform how a **Holoscan-based ADI ToF pipeline** could be built. The current `adi_3dtof_adtf31xx` package uses pure ROS 2 (`rclcpp`), but the Holoscan bridge operators enable migrating to a GPU-accelerated Holoscan pipeline while keeping ROS 2 compatibility.
 
-| Aspect | ADI 3DToF node | Holoscan pubsub |
+### Current Architecture (adi_3dtof_adtf31xx — Pure ROS 2)
+
+```
+ADTF3175 ToF Sensor (USB / 10.43.0.1)
+    ↓  libaditof SDK (InputSensorADTF31XX)
+    ↓  raw depth/AB/conf/XYZ frames
+readInput() thread → input_frames_queue_
+    ↓
+readNextFrame() → optional RVL compress
+    ↓ output_node_queue_
+processOutput() → publishImageAndCameraInfo()
+    ↓
+rclcpp::Publisher → /cam1/depth_image
+                  → /cam1/ab_image
+                  → /cam1/conf_image
+                  → /cam1/camera_info
+                  → /cam1/point_cloud
+```
+
+### Future Architecture (Holoscan-based)
+
+Using the `PublisherOp` pattern from holohub, the same pipeline could be implemented as:
+
+```
+ADTF3175 ToF Sensor
+    ↓  libaditof SDK → custom Holoscan operator (DepthCaptureOp)
+    ↓  depth/AB tensors on GPU
+Optional CUDA processing (filtering, point cloud projection)
+    ↓
+PublisherOp<sensor_msgs::msg::Image>(topic="/cam1/depth_image", qos=10)
+PublisherOp<sensor_msgs::msg::Image>(topic="/cam1/ab_image", qos=10)
+PublisherOp<sensor_msgs::msg::PointCloud2>(topic="/cam1/point_cloud", qos=10)
+```
+
+### Comparison: adi_3dtof_adtf31xx vs holohub patterns
+
+| Aspect | ADI 3DToF node (current) | Holoscan approach (from holohub) |
 |---|---|---|
 | Framework | ROS 2 (`rclcpp`) | Holoscan SDK + ROS 2 bridge |
-| Publisher API | `rclcpp::Publisher` | `holoscan::ros2::ops::PublisherOp` |
-| GPU processing | Optional (RVL codec) | Core design (CUDA pipeline) |
-| Sensor | ADTF3175 (ToF) | VB1940 Eagle (RGB camera) |
-| Topic data | Depth, AB, confidence, point cloud | RGB image |
+| Sensor input | `libaditof` via `InputSensorADTF31XX` | Custom `DepthCaptureOp` wrapping `libaditof` |
+| Publisher API | `rclcpp::Publisher::publish()` | `holoscan::ros2::ops::PublisherOp` |
+| Threading | Manual (`std::thread` input/output) | Holoscan executor manages scheduling |
+| GPU processing | Optional (RVL compression only) | Core design — CUDA operations in operators |
+| Compression | RVL lossless (custom) | Not needed (GPU-direct pipeline) |
+| Point cloud | CPU-side LUT projection | Could be GPU-side with CUDA operator |
+| Sensor data | Depth (16-bit), AB, conf, XYZ | Any sensor type via custom operator |
+
+### Adapting `PublisherOp` for ToF depth images
+
+```cpp
+// Minimal example: publish depth image from Holoscan operator
+class DepthPublisherOp : public holoscan::ros2::ops::PublisherOp<sensor_msgs::msg::Image> {
+public:
+    HOLOSCAN_OPERATOR_FORWARD_ARGS_SUPER(DepthPublisherOp,
+        holoscan::ros2::ops::PublisherOp<sensor_msgs::msg::Image>)
+
+    void compute(InputContext& op_input, OutputContext&, ExecutionContext&) override {
+        auto depth_tensor = op_input.receive<holoscan::gxf::Entity>("depth");
+        sensor_msgs::msg::Image msg;
+        msg.header.stamp = rclcpp::Clock().now();
+        msg.encoding     = "mono16";
+        msg.width        = image_width_;
+        msg.height       = image_height_;
+        // copy depth data to msg.data...
+        publish(msg);
+    }
+};
+```

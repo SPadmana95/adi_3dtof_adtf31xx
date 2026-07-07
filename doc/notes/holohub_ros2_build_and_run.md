@@ -2,7 +2,16 @@
 
 ## Overview
 
-This guide describes how to build and run the `pubsub` (Holoscan ↔ ROS 2 Publisher/Subscriber) application from the `holohub` repository on **NVIDIA AGX Thor** with **JetPack 7.0** and **Holoscan SDK 3.9.0**.
+This guide describes how to build and run the `pubsub` and `vb1940` Holoscan ↔ ROS 2 applications from the `holohub` repository on **NVIDIA AGX Thor** with **JetPack 7.0** and **Holoscan SDK 3.9.0**.
+
+Clone the repository before running any commands:
+
+```sh
+git clone -b adcam_ros2 https://github.com/SPadmana95/holohub.git
+cd holohub
+```
+
+All build and run commands in this guide assume your working directory is the `holohub` root.
 
 ### Why `pubsub` and not `holoscan_ros2`?
 
@@ -10,9 +19,25 @@ This guide describes how to build and run the `pubsub` (Holoscan ↔ ROS 2 Publi
 - `pubsub` — string message pub/sub (C++ and Python)
 - `vb1940` — VB1940 Eagle camera pipeline (C++ only)
 
-### Why a separate Dockerfile?
+### Native Build Option (No Docker)
 
-The generic holohub container (`holohub:ngc-v3.9.0-cuda13`) does **not** include ROS 2. The `pubsub` application has its own Dockerfile at `applications/holoscan_ros2/Dockerfile` which installs **ROS 2 Jazzy** and configures `CMAKE_PREFIX_PATH` to include both `/opt/ros/jazzy` and `/opt/nvidia/holoscan`.
+Since **ROS 2 Jazzy is natively installed** on AGX Thor (verified: `echo $ROS_DISTRO` → `jazzy`), you can build and run `pubsub` without Docker:
+
+```sh
+cd holohub
+source /opt/ros/jazzy/setup.bash
+
+# Build natively
+./holohub build pubsub --language cpp
+
+# Run publisher (terminal 1)
+./holohub run pubsub publisher --language cpp
+
+# Run subscriber (terminal 2)
+./holohub run pubsub subscriber --language cpp
+```
+
+> This is faster and simpler than Docker for development on AGX Thor. Docker is recommended for reproducible deployments or when ROS 2 is not natively available on the target machine.
 
 ### Why do `pubsub` and `vb1940` have separate Dockerfiles?
 
@@ -66,7 +91,7 @@ exit
 ## Step 2 — Navigate to the holohub directory
 
 ```sh
-cd /home/jetsonthor/siva/SPadmana95/holohub
+cd holohub
 ```
 
 ---
@@ -77,8 +102,11 @@ Use the `pubsub` project name so the CLI picks up `applications/holoscan_ros2/Do
 
 ```sh
 ./holohub build-container pubsub --language cpp \
-  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
+  --build-args="--no-cache"
 ```
+
+> **Why `--no-cache`?** Both Dockerfiles contain `Acquire::ForceIPv4 "true"` to fix IPv6 network failures. Without `--no-cache`, Docker may reuse a stale cached layer from before this fix was applied.
 
 **What this Dockerfile does:**
 - Installs `ros-jazzy-desktop` and `ros-jazzy-ros-base`
@@ -157,6 +185,10 @@ Publishing: 'Hello, world! 2'
 ...
 ```
 
+> **To stop:** Press `Ctrl+C`. The publisher runs indefinitely until stopped.
+
+> **`ROS_DOMAIN_ID`:** Publisher and subscriber must be on the same ROS 2 domain. If they don't communicate, check: `echo $ROS_DOMAIN_ID` in both terminals — both should show the same value (default is `0`).
+
 ### Terminal 2 — Subscriber
 
 From the **host**, open a second shell into the running container:
@@ -186,23 +218,28 @@ I heard: 'Hello, world! 2'
 
 ---
 
-## Root Cause Summary
+## Troubleshooting
 
-| Problem | Cause | Fix |
+| Error | Root Cause | Fix |
 |---|---|---|
-| `rclcpp` not found during CMake | Generic holohub container has no ROS 2 installed | Use `pubsub` project name to trigger `applications/holoscan_ros2/Dockerfile` |
-| Wrong base image in Dockerfile | App Dockerfile hardcodes `holoscan:v3.3.0-dgpu` | Override with `--base-img holoscan:v3.9.0-cuda13` |
+| `rclcpp` not found during CMake | Generic holohub container has no ROS 2 | Use `pubsub` or `vb1940` project name — not `holoscan_ros2` — to pick up the app-specific Dockerfile |
+| `holoscan 4.0 not found` (CMake) | vb1940 Dockerfile clones HSB `main` branch (requires SDK 4.0+) | Dockerfile now pins `git checkout tags/2.5.0` — rebuild with `--no-cache` |
+| `Network is unreachable` (apt) | Docker `apt` resolves to IPv6 address; AGX Thor has no IPv6 routing | Both Dockerfiles include `Acquire::ForceIPv4 "true"` fix — rebuild with `--no-cache` |
+| Old cached layer reused | Docker uses cached layer from before Dockerfile fix | Add `--build-args="--no-cache"` to `build-container` command |
+| Wrong base image | App Dockerfile hardcodes `holoscan:v3.3.0-dgpu` | Always pass `--base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13` |
+| Publisher and subscriber don't communicate | Different `ROS_DOMAIN_ID` values | Ensure `echo $ROS_DOMAIN_ID` is the same in both terminals (default: `0`) |
+| Standalone holohub uses old Dockerfile | Fix applied to submodule but not synced | Run `cd holohub && git pull origin adcam_ros2` |
+| `holoscan_ros2` has no run config | `holoscan_ros2` is a parent dir, not a runnable app | Use `pubsub` or `vb1940` as the project name |
 
 ---
 
 ## Quick Reference — All Commands
 
 ```sh
-# On host
-cd /home/jetsonthor/siva/SPadmana95/holohub
-
-./holohub build-container pubsub --language cpp \
-  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13
+# On host — navigate to holohub
+cd holohub --language cpp \
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
+  --build-args="--no-cache"
 
 ./holohub run-container pubsub --language cpp
 
@@ -278,7 +315,7 @@ exit
 ## Step 2 — Navigate to holohub directory
 
 ```sh
-cd /home/jetsonthor/siva/SPadmana95/holohub
+cd holohub
 ```
 
 ---
@@ -312,6 +349,23 @@ docker images | grep vb1940
 ```sh
 ./holohub run-container vb1940 --language cpp
 ```
+
+---
+
+## Step 4b — SSH Key Setup (required before Step 5)
+
+The vb1940 build requires SSH access to the NVIDIA internal hololink repository. Set up SSH agent forwarding **before** entering the container:
+
+```sh
+# On host — start ssh-agent and add your key
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_rsa          # or id_ed25519 depending on your key type
+
+# Verify key is loaded
+ssh-add -l
+```
+
+The `./holohub run-container` script automatically forwards the SSH agent into the container when `ssh-agent` is running.
 
 ---
 
@@ -374,6 +428,8 @@ source /opt/ros/jazzy/setup.bash
 ./holohub run vb1940 subscriber --language cpp -- --headless
 ./holohub run vb1940 subscriber --language cpp -- --fullscreen
 ```
+
+> **To stop:** Press `Ctrl+C` in the publisher terminal. The subscriber will exit automatically once the publisher stops. Ensure `ROS_DOMAIN_ID` is the same in both terminals.
 
 ---
 
@@ -588,8 +644,8 @@ vb1940:
 ## Quick Reference — All Commands
 
 ```sh
-# On host
-cd /home/jetsonthor/siva/SPadmana95/holohub
+# On host — navigate to holohub
+cd holohub
 
 ./holohub build-container vb1940 --language cpp \
   --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
@@ -609,3 +665,125 @@ docker exec -it <container_id> bash
 source /opt/ros/jazzy/setup.bash
 ./holohub run vb1940 subscriber --language cpp
 ```
+
+---
+
+---
+
+# Docker Reference — Container Detection and Cache Control
+
+## How to Know If You Are Inside or Outside a Docker Container
+
+### Method 1 — Check for `.dockerenv` file (most reliable)
+
+```sh
+ls /.dockerenv && echo "INSIDE container" || echo "OUTSIDE container"
+```
+
+### Method 2 — Check the shell prompt
+
+```sh
+# Outside (host): username@hostname format with tilde home path
+user@myhostname:~/holohub$
+
+# Inside holohub container: root user with short container hash and /workspace path
+root@b3f40405e4f6:/workspace/holohub$
+```
+
+Inside the container: user is always `root`, hostname is a short container ID hash, working directory is `/workspace/holohub`.
+
+### Method 3 — Check `cgroup`
+
+```sh
+cat /proc/1/cgroup | grep -i docker
+# Returns output if inside container, empty if on host
+```
+
+### Method 4 — Check for Docker-specific environment variables
+
+```sh
+env | grep -i docker
+# e.g. DOCKER_CONTAINER=1 may be set by the holohub run script
+```
+
+### Summary
+
+| Indicator | Host (outside) | Container (inside) |
+|---|---|---|
+| `ls /.dockerenv` | File not found | File exists |
+| Hostname | Your machine hostname | Short container ID hash |
+| User | Your login username | `root` |
+| Working dir | `~/holohub` | `/workspace/holohub` |
+| `cat /proc/1/cgroup` | No `docker` entries | Contains `docker` entries |
+
+---
+
+## Docker Build — With and Without Cache
+
+### Standard build (with cache — default)
+
+Docker reuses cached layers for any Dockerfile step whose instruction has not changed. This makes repeated builds fast.
+
+```sh
+# Generic docker
+docker build -t my_image .
+
+# holohub wrapper (uses cache by default)
+./holohub build-container vb1940 --language cpp \
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13
+```
+
+### Build without cache (`--no-cache`)
+
+Forces Docker to re-execute every layer from scratch. Use this when a cached layer is stale (e.g. a `git clone` step cached before a Dockerfile fix).
+
+```sh
+# Generic docker
+docker build --no-cache -t my_image .
+
+# holohub wrapper
+./holohub build-container vb1940 --language cpp \
+  --base-img nvcr.io/nvidia/clara-holoscan/holoscan:v3.9.0-cuda13 \
+  --build-args="--no-cache"
+```
+
+### Clear the Docker build cache manually
+
+```sh
+# Remove only dangling/unused build cache
+docker builder prune
+
+# Remove ALL build cache (frees maximum disk space)
+docker builder prune -a
+
+# Check how much disk cache is being used
+docker system df
+```
+
+### When to use `--no-cache`
+
+| Situation | Use `--no-cache`? |
+|---|---|
+| First-ever build (no cache exists) | No — nothing to reuse anyway |
+| Dockerfile was updated but Docker still uses old cached `git clone` layer | **Yes** |
+| `apt` packages need to be refreshed | **Yes** |
+| Build failed with IPv6 error before IPv4 fix was applied | **Yes** |
+| SDK version mismatch error occurred before HSB `2.5.0` pin was added | **Yes** |
+| Only your application code changed (not the Dockerfile) | No — cache speeds it up |
+| Debugging a failed build and want a guaranteed clean state | **Yes** |
+
+### Why `--no-cache` matters for `vb1940`
+
+The `vb1940` Dockerfile contains this step:
+
+```dockerfile
+# Before fix (cached layer — clones main branch, SDK 4.0+)
+RUN git clone https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git
+
+# After fix (correct — checks out tag 2.5.0, SDK 3.9.0 compatible)
+RUN git clone https://github.com/nvidia-holoscan/holoscan-sensor-bridge.git \
+    && cd holoscan-sensor-bridge \
+    && git checkout tags/2.5.0
+```
+
+Even after the Dockerfile is updated, Docker may still serve the **old cached layer** for the `git clone` step because the cache key matches. `--no-cache` forces re-execution of the clone with the new tag checkout.
