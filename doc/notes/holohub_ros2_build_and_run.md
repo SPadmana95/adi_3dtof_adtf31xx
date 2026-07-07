@@ -49,6 +49,7 @@ Each application has different dependencies and a shared Dockerfile would force 
 | Holoscan SDK | 3.9.0 |
 | Docker | With NVIDIA Container Toolkit |
 | holohub branch | `adcam_ros2` (tag `holoscan-sdk-3.9.0`) |
+| holoscan-sensor-bridge branch | `demo_HSB_ToF_ROS2` (base tag `2.5.0`) |
 
 ---
 
@@ -246,6 +247,7 @@ The `vb1940` application demonstrates a full GPU-accelerated camera pipeline usi
 | Hololink Board IP | `192.168.0.2` (default) |
 | SSH key | Access to NVIDIA internal hololink repo |
 | holohub branch | `adcam_ros2` (tag `holoscan-sdk-3.9.0`) |
+| holoscan-sensor-bridge branch | `demo_HSB_ToF_ROS2` (base tag `2.5.0`, SDK 3.9.0 compatible) |
 
 ---
 
