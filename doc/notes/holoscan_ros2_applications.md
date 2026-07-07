@@ -98,6 +98,211 @@ The simplest demonstration of bidirectional Holoscan ↔ ROS 2 communication usi
 
 ---
 
+### pubsub Code Flow — talker (Publisher)
+
+#### C++ (`pubsub/cpp/talker.cpp`)
+
+```
+main()
+  │
+  ├─ rclcpp::init(argc, argv)          — initialise ROS 2 runtime
+  │
+  ├─ HoloscanSimplePublisherApp app
+  │
+  └─ app.run()                          — start Holoscan executor
+         │
+         └─ compose()
+               │
+               ├─ make_resource<Bridge>("holoscan_publisher_resource",
+               │                        "holoscan_publisher_node")
+               │     └─ creates rclcpp::Node("holoscan_publisher_node")
+               │     └─ launches rclcpp::spin(node) in std::async thread
+               │
+               └─ make_operator<SimplePublisherOp>(
+                       PeriodicCondition(500ms),     — fires every 500ms
+                       Arg("ros2_bridge", bridge),
+                       Arg("topic_name", "topic"),
+                       Arg("qos", QoS(10)))
+                         │
+                         └─ initialize()
+                               └─ bridge->create_publisher<String>("topic", QoS(10))
+
+        ── executor fires every 500ms ──▶  SimplePublisherOp::compute()
+               │
+               ├─ msg.data = "Hello, world! " + std::to_string(count_++)
+               ├─ HOLOSCAN_LOG_INFO("Publishing: '{}'", msg.data)
+               └─ publish(msg)
+                     └─ publisher_->publish(msg)
+                           └─ rclcpp::Publisher::publish()  → DDS → ROS 2 topic "topic"
+```
+
+#### Python (`pubsub/python/talker.py`)
+
+```
+main()
+  │
+  ├─ logging.basicConfig(level=INFO)
+  ├─ rclpy.init()                       — initialise ROS 2 runtime
+  │
+  └─ HoloscanSimplePublisherApp().run()
+         │
+         └─ __init__()
+         │     └─ self.node = Node("holoscan_publisher_node")  ← explicit node creation
+         │
+         └─ compose()
+               │
+               ├─ Bridge(self, self.node, name="holoscan_publisher_resource")
+               │     └─ wraps the rclpy Node; starts spin in background thread
+               │
+               └─ SimplePublisherOp(
+                       self,
+                       PeriodicCondition(recess_period=0.5),  — fires every 500ms
+                       bridge,
+                       topic_name="topic",
+                       qos=10,
+                       message_type=String)           ← Python requires explicit type
+                         │
+                         └─ initialize()
+                               └─ bridge.create_publisher(String, "topic", 10)
+
+        ── executor fires every 500ms ──▶  SimplePublisherOp.compute()
+               │
+               ├─ msg = String()
+               ├─ msg.data = f"Hello, world! {self.count}"
+               ├─ logging.info(f"Publishing: '{msg.data}'")
+               ├─ self.publish(msg)
+               │     └─ publisher_.publish(msg) → rclpy → DDS → ROS 2 topic "topic"
+               └─ self.count += 1
+```
+
+**Key C++ vs Python difference (talker):**  In C++, `Bridge` creates the `rclcpp::Node` internally by name. In Python, the `Node` is created explicitly before `Bridge` and passed in — required because `rclpy` nodes need to be created on the main thread.
+
+---
+
+### pubsub Code Flow — listener (Subscriber)
+
+#### C++ (`pubsub/cpp/listener.cpp`)
+
+```
+main()
+  │
+  ├─ rclcpp::init(argc, argv)
+  │
+  └─ HoloscanSimpleSubscriberApp app
+         │
+         └─ app.run()
+               │
+               └─ compose()
+                     │
+                     ├─ make_resource<Bridge>("holoscan_subscriber_resource",
+                     │                        "holoscan_subscriber_node")
+                     │     └─ creates rclcpp::Node, launches spin thread
+                     │
+                     └─ make_operator<SimpleSubscriberOp>(
+                             Arg("ros2_bridge", bridge),
+                             Arg("topic_name", "topic"),
+                             Arg("qos", QoS(10)))
+                               │
+                               └─ initialize()
+                                     └─ bridge->create_subscription<String>("topic", QoS(10))
+                                           └─ registers on_receive() callback in ROS 2 spin thread
+
+        ── ROS 2 spin thread ──▶  on_receive(msg)
+               └─ if promise waiting → promise.set_value(msg)
+                  else              → message_queue_.push(msg)
+
+        ── Holoscan executor ──▶  SimpleSubscriberOp::compute()
+               │
+               └─ auto message = receive().get()
+                     │
+                     ├─ receive() → returns std::future<String>
+                     │   ├─ if message in queue → future resolved immediately
+                     │   └─ else → promise queued; blocks until on_receive() fires
+                     │
+                     └─ HOLOSCAN_LOG_INFO("I heard: '{}'", message.data)
+```
+
+#### Python (`pubsub/python/listener.py`)
+
+```
+main()
+  │
+  ├─ logging.basicConfig(level=INFO)
+  ├─ rclpy.init()
+  │
+  └─ HoloscanSubscriberApp().run()
+         │
+         └─ __init__()
+         │     └─ self.node = Node("holoscan_subscriber_node")
+         │
+         └─ compose()
+               │
+               ├─ Bridge(self, self.node, name="holoscan_subscriber_resource")
+               │
+               └─ MySubscriberOp(self, bridge)
+                     └─ __init__: message_type=String, topic_name="topic", qos=10
+                     └─ initialize():
+                           └─ bridge.create_subscription(String, "topic", 10)
+                                 └─ rclpy callback registered in spin thread
+
+        ── rclpy spin thread ──▶  on_receive(msg)
+               └─ if future waiting → future.set_result(msg)
+                  else              → message_queue.push(msg)
+
+        ── Holoscan executor ──▶  MySubscriberOp.compute()  (loop until message)
+               │
+               └─ while True:
+                     │
+                     ├─ future = self.receive()
+                     │
+                     ├─ message = future.result(timeout=1.0)   ← 1s timeout
+                     │     ├─ TimeoutError → check rclpy.ok()
+                     │     │     ├─ False → shutdown detected → return
+                     │     │     └─ True  → continue waiting
+                     │     └─ success → logging.info(f"I heard: '{message.data}'")
+                     │                  return  (exit compute after one message)
+```
+
+**Key C++ vs Python difference (listener):**  In C++, `receive().get()` blocks the compute thread directly with no timeout — it simply waits on the `std::future`. In Python, a **timeout loop** is used (`future.result(timeout=1.0)`) so the thread can periodically check `rclpy.ok()` and exit gracefully on ROS 2 shutdown. This is necessary because Python threads don't support the same `std::future` cancellation model as C++.
+
+---
+
+### Full Flow Diagram — talker + listener together
+
+```mermaid
+sequenceDiagram
+    participant Main as main()
+    participant App as HoloscanApp
+    participant Bridge as Bridge (ROS 2 node)
+    participant Op as Publisher/SubscriberOp
+    participant DDS as ROS 2 DDS
+    participant Spin as ROS 2 spin thread
+
+    Main->>App: rclcpp::init() / rclpy.init()
+    Main->>App: app.run() → compose()
+    App->>Bridge: create Bridge (node_name)
+    Bridge->>Spin: launch rclcpp::spin(node) async
+    App->>Op: make_operator (bridge, topic, qos)
+    Op->>Bridge: create_publisher / create_subscription
+
+    loop Every 500ms (talker)
+        App->>Op: compute()
+        Op->>Op: build String message
+        Op->>Bridge: publish(msg)
+        Bridge->>DDS: rclcpp::Publisher::publish()
+        DDS-->>Spin: deliver to subscriber
+        Spin-->>Op: on_receive(msg) → message_queue / promise
+    end
+
+    loop On message available (listener)
+        App->>Op: compute()
+        Op->>Op: receive().get() / future.result(timeout=1s)
+        Op->>Op: log "I heard: '...'"
+    end
+```
+
+---
+
 ### vb1940/ — VB1940 Eagle Camera Examples (Advanced)
 
 Production-grade example using the VB1940 (Eagle) camera with a full GPU-accelerated pipeline publishing to ROS 2.
