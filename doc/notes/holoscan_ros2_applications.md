@@ -362,6 +362,225 @@ PublisherOp<sensor_msgs::msg::Image>    — publishes to ROS 2 topic: vb1940/ima
 
 ---
 
+### vb1940 Code Flow — Publisher (`vb1940_publisher.cpp`)
+
+```
+main()
+  │
+  ├─ rclcpp::init(argc, argv)              — initialise ROS 2
+  ├─ Parse CLI args:
+  │     --camera-mode  (default: 2560x1984 30FPS)
+  │     --frame-limit  (default: 0 = unlimited)
+  │     --hololink     (default: 192.168.0.2)
+  │     --ibv-name     (default: first IBV device)
+  │     --ibv-port     (default: 1)
+  │
+  ├─ cuInit(0)                             — initialise CUDA runtime
+  ├─ Enumerate IBV devices (hololink::core::infiniband_devices())
+  ├─ Connect to Hololink board via hololink::core::Enumerator (IP 192.168.0.2)
+  ├─ Create NativeVb1940Sensor (camera) + set camera_mode
+  │
+  └─ HoloscanVb1940PublisherApplication app
+         │
+         └─ app.run() → compose()
+               │
+               ├─ camera_->set_mode(camera_mode_)        — configure sensor resolution/FPS
+               │
+               ├─ [Operator pipeline construction]
+               │   ├─ RoceReceiverOp ("receiver")
+               │   │     └─ opens IBV device, allocates RDMA buffer, starts camera DMA
+               │   ├─ CsiToBayerOp ("csi_to_bayer")
+               │   │     └─ converts packed MIPI CSI-2 → Bayer pattern (GPU)
+               │   ├─ ImageProcessorOp ("image_processor")
+               │   │     └─ optical black correction (value=8 for RAW10), pixel format conversion
+               │   ├─ BayerDemosaicOp ("demosaic")
+               │   │     └─ Bayer → RGB16 (OpenCV CUDA demosaic, generate_alpha=false)
+               │   └─ Vb1940PublisherOp ("vb1940_publisher")
+               │         └─ Bridge("vb1940_bridge_resource", "vb1940_bridge_node")
+               │         └─ topic_name="vb1940/image", QoS(10)
+               │
+               └─ add_flow pipeline:
+                   receiver → csi_to_bayer → image_processor → demosaic → vb1940_publisher
+
+        ── per frame (each RoceReceiverOp trigger) ──▶  Vb1940PublisherOp::compute()
+               │
+               ├─ op_input.receive<gxf::Entity>("input")   — get RGB16 tensor from demosaic
+               ├─ entity.findAll<gxf::Tensor>()             — extract tensor
+               │
+               ├─ [first frame only]
+               │     ├─ Set message_.encoding = "rgb8"
+               │     ├─ Set message_.width, height, step
+               │     └─ message_.data.resize(width * height * 3 * sizeof(uint8_t))
+               │
+               ├─ cudaMalloc(&d_rgb8_buffer_, output_size)  — allocate GPU 8-bit buffer (once)
+               │
+               ├─ launch_convert_16bit_to_8bit_kernel(      — CUDA kernel: >> 8 per channel
+               │       tensor_ptr,           ← RGB16 on GPU
+               │       d_rgb8_buffer_,       ← output RGB8 on GPU
+               │       width, height, 3)
+               │
+               ├─ message_.header.stamp = rclcpp::Clock().now()
+               │
+               ├─ cudaMemcpy(message_.data.data(),          — GPU → CPU (device to host)
+               │             d_rgb8_buffer_, size,
+               │             cudaMemcpyDeviceToHost)
+               │
+               └─ publish(message_)
+                     └─ rclcpp::Publisher::publish()  → DDS → topic "vb1940/image"
+```
+
+---
+
+### vb1940 Code Flow — Subscriber (`vb1940_subscriber.cpp`)
+
+```
+main()
+  │
+  ├─ rclcpp::init(argc, argv)
+  ├─ Parse CLI args: --headless, --fullscreen
+  │
+  └─ HoloscanVb1940SubscriberApplication app(headless, fullscreen)
+         │
+         └─ app.run() → compose()
+               │
+               ├─ Bridge("vb1940_subscriber_bridge_resource",
+               │          "vb1940_subscriber_bridge_node")
+               │     └─ creates rclcpp::Node, launches spin thread
+               │
+               ├─ BlockMemoryPool ("pool")
+               │     └─ device memory, block_size = 2560×1984×3 bytes (max RGB8 frame)
+               │     └─ num_blocks = 2
+               │
+               ├─ Vb1940SubscriberOp ("vb1940_subscriber")
+               │     ├─ topic_name = "vb1940/image"
+               │     ├─ QoS(10)
+               │     ├─ pool = tensor_pool
+               │     └─ message_queue_max_size = 3  ← drop old frames if pipeline lags
+               │
+               ├─ HolovizOp ("holoviz")
+               │     ├─ fullscreen, headless
+               │     ├─ framebuffer_srgb = true
+               │     └─ enable_cuda_interop = true
+               │
+               └─ add_flow(subscriber, visualizer, {{"output", "receivers"}})
+
+        ── ROS 2 spin thread ──▶  on_receive(sensor_msgs::Image)
+               └─ message pushed to message_queue_ (or promise resolved)
+
+        ── Holoscan executor ──▶  Vb1940SubscriberOp::compute()
+               │
+               ├─ auto message = receive().get()          — blocking wait on std::future
+               │
+               ├─ CreateTensorMap(context,                — allocate GXF tensor
+               │       allocator,
+               │       shape = {height, width, 3},        — RGB
+               │       type  = kUnsigned8,                — uint8_t
+               │       storage = kDevice)                 — GPU memory
+               │
+               ├─ cudaMemcpy(tensor_ptr,                  — CPU → GPU (host to device)
+               │             message.data.data(),
+               │             message.data.size(),
+               │             cudaMemcpyHostToDevice)
+               │
+               └─ op_output.emit(entity, "output")        — send tensor to HolovizOp
+                     └─ HolovizOp renders frame on screen (Vulkan/CUDA interop)
+```
+
+---
+
+### vb1940 Full Flow Diagram — Publisher + Subscriber together
+
+```mermaid
+sequenceDiagram
+    participant HW as VB1940 Camera (192.168.0.2)
+    participant IBV as Hololink FPGA / IBV device
+    participant PubApp as vb1940_publisher (Holoscan App)
+    participant Pipeline as GPU Pipeline
+    participant DDS as ROS 2 DDS
+    participant SubApp as vb1940_subscriber (Holoscan App)
+    participant Viz as HolovizOp (Vulkan)
+
+    Note over PubApp: main() — rclcpp::init(), cuInit(), connect Hololink
+    PubApp->>IBV: RoceReceiverOp — open IBV device, start RDMA DMA
+    PubApp->>Pipeline: compose() pipeline: RoCE→CSI→ImageProc→Demosaic→Publisher
+
+    loop Per camera frame
+        HW->>IBV: MIPI CSI-2 raw frame
+        IBV->>PubApp: RDMA transfer → GPU memory (zero-copy)
+        PubApp->>Pipeline: CsiToBayerOp — CSI-2 → Bayer pattern (GPU)
+        Pipeline->>Pipeline: ImageProcessorOp — black level correction (GPU)
+        Pipeline->>Pipeline: BayerDemosaicOp — Bayer → RGB16 (GPU, OpenCV CUDA)
+        Pipeline->>Pipeline: CUDA kernel — RGB16 >> 8 → RGB8 (GPU)
+        Pipeline->>Pipeline: cudaMemcpy DeviceToHost — RGB8 to CPU
+        Pipeline->>DDS: PublisherOp::publish(sensor_msgs/Image) → topic vb1940/image
+    end
+
+    Note over SubApp: main() — rclcpp::init(), parse --headless/--fullscreen
+    SubApp->>SubApp: compose() — Bridge + BlockMemoryPool + SubscriberOp + HolovizOp
+
+    loop Per received frame
+        DDS-->>SubApp: ROS 2 spin thread → on_receive(sensor_msgs/Image)
+        SubApp->>SubApp: Vb1940SubscriberOp::compute() — receive().get()
+        SubApp->>SubApp: CreateTensorMap — allocate GXF tensor (GPU device memory)
+        SubApp->>SubApp: cudaMemcpy HostToDevice — CPU → GPU
+        SubApp->>Viz: op_output.emit(entity) → HolovizOp
+        Viz->>Viz: Render frame (Vulkan/CUDA interop)
+    end
+```
+
+---
+
+### vb1940 Publisher — Step-by-Step Summary
+
+| Step | Where | What happens |
+|---|---|---|
+| 1 | `main()` | `rclcpp::init()`, `cuInit()`, parse CLI args |
+| 2 | `main()` | Enumerate IBV devices, connect Hololink board at `192.168.0.2` |
+| 3 | `main()` | Create `NativeVb1940Sensor`, set `camera_mode` |
+| 4 | `compose()` | Build 5-operator pipeline: `RoCE → CSI → ImgProc → Demosaic → Publisher` |
+| 5 | `RoceReceiverOp` | Opens IBV device, allocates RDMA buffer, starts camera DMA |
+| 6 | `CsiToBayerOp` | Converts MIPI CSI-2 packed raw → Bayer pattern on GPU |
+| 7 | `ImageProcessorOp` | Applies optical black correction (value=8, RAW10 format) |
+| 8 | `BayerDemosaicOp` | Converts Bayer → RGB16 using OpenCV CUDA demosaic |
+| 9 | `Vb1940PublisherOp::compute()` | CUDA kernel `>> 8`: RGB16 → RGB8 on GPU |
+| 10 | `Vb1940PublisherOp::compute()` | `cudaMemcpy DeviceToHost`: RGB8 → CPU RAM |
+| 11 | `Vb1940PublisherOp::compute()` | `publish(sensor_msgs/Image)` → ROS 2 topic `vb1940/image` |
+
+### vb1940 Subscriber — Step-by-Step Summary
+
+| Step | Where | What happens |
+|---|---|---|
+| 1 | `main()` | `rclcpp::init()`, parse `--headless` / `--fullscreen` |
+| 2 | `compose()` | Create `Bridge` + ROS 2 node + spin thread |
+| 3 | `compose()` | Create `BlockMemoryPool` (GPU device memory, 2 blocks, max frame size) |
+| 4 | `compose()` | Create `Vb1940SubscriberOp` with `message_queue_max_size=3` |
+| 5 | `compose()` | Create `HolovizOp` with Vulkan/CUDA interop enabled |
+| 6 | `compose()` | Connect: `subscriber["output"] → holoviz["receivers"]` |
+| 7 | ROS 2 spin thread | `on_receive(sensor_msgs/Image)` → push to `message_queue_` |
+| 8 | `Vb1940SubscriberOp::compute()` | `receive().get()` — blocks until frame arrives |
+| 9 | `Vb1940SubscriberOp::compute()` | `CreateTensorMap` — allocate GXF tensor on GPU |
+| 10 | `Vb1940SubscriberOp::compute()` | `cudaMemcpy HostToDevice`: CPU → GPU |
+| 11 | `Vb1940SubscriberOp::compute()` | `op_output.emit(entity)` → HolovizOp |
+| 12 | `HolovizOp` | Render frame using Vulkan/CUDA interop — zero GPU copy to display |
+
+| Aspect | pubsub `SimplePublisherOp` | vb1940 `Vb1940PublisherOp` |
+|---|---|---|
+| Input | None (generates data internally) | `spec.input<gxf::Entity>("input")` from demosaic |
+| Data source | Synthetic string | RGB16 tensor from GPU pipeline |
+| GPU work | None | CUDA kernel `>> 8` per channel |
+| Memory | None | `cudaMalloc` + `cudaMemcpy DeviceToHost` |
+| Message type | `std_msgs/String` | `sensor_msgs/Image` (rgb8) |
+
+| Aspect | pubsub `SimpleSubscriberOp` | vb1940 `Vb1940SubscriberOp` |
+|---|---|---|
+| Output | None (logs to console) | `spec.output<gxf::Entity>("output")` to HolovizOp |
+| GPU work | None | `cudaMemcpy HostToDevice` + tensor allocation |
+| Memory pool | None | `BlockMemoryPool` (GPU device memory) |
+| Queue size | Unlimited | 3 (drops stale frames) |
+| Visualization | Console log | HolovizOp (Vulkan/CUDA display) |
+
+---
+
 ## Holoscan ↔ ROS 2 Bridge Architecture
 
 Source path: `holohub/operators/holoscan_ros2/`
