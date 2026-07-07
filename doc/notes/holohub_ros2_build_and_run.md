@@ -14,6 +14,30 @@ This guide describes how to build and run the `pubsub` (Holoscan ↔ ROS 2 Publi
 
 The generic holohub container (`holohub:ngc-v3.9.0-cuda13`) does **not** include ROS 2. The `pubsub` application has its own Dockerfile at `applications/holoscan_ros2/Dockerfile` which installs **ROS 2 Jazzy** and configures `CMAKE_PREFIX_PATH` to include both `/opt/ros/jazzy` and `/opt/nvidia/holoscan`.
 
+### Why do `pubsub` and `vb1940` have separate Dockerfiles?
+
+Each application has different dependencies and a shared Dockerfile would force unnecessary build time on simpler use cases:
+
+| Dependency | `pubsub` | `vb1940` | Reason |
+|---|---|---|---|
+| ROS 2 Jazzy | ✓ | ✓ | Required for topic publishing/subscribing |
+| Holoscan SDK | ✓ | ✓ | Core pipeline framework |
+| Vulkan (`vulkan-tools`, `libvulkan1`) | ✗ | ✓ | HoloViz needs Vulkan for GPU-accelerated image display |
+| `holoscan-sensor-bridge` (built from source) | ✗ | ✓ | C++ libraries for VB1940 camera over RDMA/IBV (RoCE receiver, CSI-to-Bayer, image processor) |
+| IBV/RDMA support | ✗ | ✓ | VB1940 camera hardware communication |
+
+**`pubsub` Dockerfile** (`applications/holoscan_ros2/Dockerfile`):
+- Installs only ROS 2 Jazzy + base Holoscan SDK
+- Minimal — no camera hardware stack, no Vulkan
+- Fast to build (~2 min)
+
+**`vb1940` Dockerfile** (`applications/holoscan_ros2/vb1940/Dockerfile`):
+- Installs ROS 2 Jazzy + Vulkan + `holoscan-sensor-bridge` (cloned at tag `2.5.0` and compiled from source)
+- Heavy — includes full camera hardware stack
+- Slow to build (~50+ min on first build)
+
+> If they shared one Dockerfile, every developer building the simple `pubsub` string example would wait 50+ minutes for the VB1940 camera SDK to compile — even though no camera hardware is involved.
+
 ---
 
 ## Prerequisites
@@ -459,6 +483,89 @@ ros2 topic echo /vb1940/image --no-arr
 | `topic echo` | No | No | built-in |
 
 > For AGX Thor with a display and GPU, **HoloViz** (Option 1) is the best choice. For quick debugging without the holohub build, **`rqt_image_view`** is the simplest.
+
+---
+
+## Why vb1940 Requires `holoscan-sensor-bridge` as a Dependency
+
+The VB1940 (Eagle) camera does **not** connect like a standard USB or CSI camera. It uses a proprietary high-speed hardware interface that requires the Holoscan Sensor Bridge SDK to function.
+
+### What the VB1940 Camera Is
+
+The VB1940 sensor connects to the host via a **Hololink board** — an FPGA-based hardware bridge that transfers raw camera data over **RDMA (Remote Direct Memory Access)** using **RoCE (RDMA over Converged Ethernet)**. This is a zero-copy, kernel-bypass data path designed for ultra-low latency.
+
+```
+VB1940 Sensor
+    ↓ MIPI CSI-2 (raw sensor data)
+Hololink FPGA Board (192.168.0.2)
+    ↓ 10GigE / RDMA / RoCE
+AGX Thor Host (IBV device)
+    ↓ holoscan-sensor-bridge
+vb1940 Application
+```
+
+### What `holoscan-sensor-bridge` Provides
+
+The SDK provides the C++ operators that implement each stage of this data path:
+
+| Operator | Source | Purpose |
+|---|---|---|
+| `RoCE ReceiverOp` | `holoscan-sensor-bridge` | Opens IBV device, receives raw frames from Hololink board via RDMA into GPU memory |
+| `CsiToBayerOp` | `holoscan-sensor-bridge` | Converts packed MIPI CSI-2 raw bitstream → Bayer pattern image |
+| `ImageProcessorOp` | `holoscan-sensor-bridge` | Applies sensor-level corrections (lens shading, black level) |
+| `NativeVb1940Sensor` | `holoscan-sensor-bridge` | Camera configuration API — sets mode, FPS, gain, exposure |
+| `Vb1940Mode` | `holoscan-sensor-bridge` | Enumerates supported sensor modes (resolution/FPS combinations) |
+
+Without these operators, the application has **no way to open the camera, receive data, or decode the raw bitstream** — the VB1940 is invisible to standard Linux camera APIs (V4L2, GStreamer, OpenCV `VideoCapture`).
+
+### Why It Must Be Built From Source Inside the Container
+
+The `holoscan-sensor-bridge` C++ libraries link directly against **Holoscan SDK** (`libholoscan`). The version must match exactly:
+
+| holoscan-sensor-bridge tag | Compatible Holoscan SDK |
+|---|---|
+| `2.5.0` | **3.9.0** ✓ |
+| `main` | 4.0+ |
+
+A mismatch causes the CMake error seen earlier:
+```
+Could not find holoscan compatible with requested version "4.0"
+Found: /opt/nvidia/holoscan version: 3.9.0
+```
+
+This is why the Dockerfile pins `git checkout tags/2.5.0` after cloning.
+
+### Why pubsub and vb1940 Have Separate Dockerfiles
+
+```
+pubsub Dockerfile                  vb1940 Dockerfile
+─────────────────                  ─────────────────
+Holoscan SDK (from base image)     Holoscan SDK (from base image)
+ROS 2 Jazzy                        ROS 2 Jazzy
+                                   Vulkan (HoloViz display)
+                                   holoscan-sensor-bridge (camera SDK, built from source)
+                                   IBV/RDMA support (VB1940 hardware)
+```
+
+If they shared one Dockerfile, every developer building the simple `pubsub` example would be forced to wait for `holoscan-sensor-bridge` to clone and compile (~30+ min) and have Vulkan installed — even when no VB1940 camera is present. The separation keeps build times fast for simpler use cases.
+
+### Data Flow Comparison
+
+```
+pubsub:
+  AGX Thor ──[DDS/ROS 2]──> /topic (std_msgs/String)
+  No hardware. No SDK. Just ROS 2.
+
+vb1940:
+  VB1940 ──[MIPI CSI-2]──> Hololink FPGA (192.168.0.2)
+         ──[10GigE RoCE]──> RoCE ReceiverOp   (holoscan-sensor-bridge)
+         ──[GPU memory]──>  CsiToBayer         (holoscan-sensor-bridge)
+                        ──> ImageProcessor     (holoscan-sensor-bridge)
+                        ──> BayerDemosaic       (Holoscan SDK)
+                        ──> CUDA 16→8bit kernel (custom)
+                        ──> PublisherOp         (holoscan ROS 2 bridge)
+                        ──> /vb1940/image       (sensor_msgs/Image)
+```
 
 ---
 
